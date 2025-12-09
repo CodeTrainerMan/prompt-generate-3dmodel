@@ -27,8 +27,30 @@ export interface SceneConfig {
   shapes: ShapeData[];
 }
 
+export interface ReferenceImages {
+  front: string;
+  back: string;
+  left: string;
+  right: string;
+}
+
 export interface GenerationState {
   isGenerating: boolean;
   error: string | null;
   statusMessage: string;
+  currentStageId?: number; 
+}
+
+export interface StageLog {
+  title: string;
+  details: string[];
+  status: 'pending' | 'active' | 'completed';
+}
+
+export interface ProcessStage {
+  id: number;
+  name: string;
+  description: string;
+  logs: string[];
+  status: 'pending' | 'processing' | 'completed';
 }
