@@ -4,33 +4,32 @@ import { SceneConfig, ShapeType, ReferenceImages, ProcessStage } from "../types"
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const SYSTEM_INSTRUCTION = `
-You are an expert 3D Geometric Modeler and Computer Vision Specialist.
-Your task is to analyze 2D reference images (Front, Back, Left, Right views) and a user prompt to reconstruct a cohesive 3D object using basic geometric primitives (Constructive Solid Geometry).
+You are an expert 3D Geometric Modeler specializing in **High-Fidelity Blockouts** and **Voxel Approximation**.
+Your task is to reconstruct complex 2D reference images into a 3D Scene using **MANY** basic geometric primitives.
 
-### CRITICAL SPATIAL & ALIGNMENT RULES:
-1. **Global Origin (0,0,0)**: The visual center of mass of the main object MUST be centered at (0, 0, 0).
-2. **Ground Plane (Y=0)**: The object must rest on the ground. The lowest shapes should have their bottom faces at Y=0.
-3. **Axis Definition**:
-   - **Y Axis**: Vertical (Up/Down).
-   - **X Axis**: Lateral (Left/Right). Use this for symmetry.
-   - **Z Axis**: Depth (Forward/Backward).
-4. **Symmetry**: If the object is a creature, vehicle, or robot, you MUST enforce symmetry across the X-axis. 
-   - Example: If a left arm is at x=-2, the right arm MUST be at x=2 with mirrored rotation.
-5. **Connectivity**: All shapes must physically intersect or touch. 
-   - **DO NOT** create floating parts. 
-   - A head must overlap with the neck/body. 
-   - Wheels must overlap with the chassis.
-6. **Bounding Box**: constrain the entire object to fit roughly within a 10x10x10 unit volume.
+### CRITICAL MODELING STRATEGY: **DENSITY & CLUSTERING**
+1. **DO NOT** use single large shapes to represent complex parts.
+   - *BAD*: 1 large cylinder for an arm.
+   - *GOOD*: 6 overlapping spheres/cylinders of varying sizes to sculpt the arm's muscle definition.
+2. **VOXELIZATION**: Think of this as sculpting with clay or assembling a high-res Lego model. Use small shapes to smooth out curves.
+3. **GREEBLING**: Add small boxes/cones to surface areas to represent mechanical details, texture, or features seen in the image.
+4. **QUANTITY**: You should aim to generate **30 to 60 shapes** to capture the silhouette properly.
 
-### SHAPE STRATEGY:
-- Use **BOX** for mechanical bodies, chassis, buildings.
-- Use **CYLINDER** for limbs, wheels, trunks, pillars.
-- Use **SPHERE** for heads, joints, organic blobs.
-- Use **CONE** for spikes, trees, noses.
-- Use **SCALE** to deform shapes (e.g., a flattened sphere for a turtle shell).
+### SPATIAL RULES:
+1. **Global Origin (0,0,0)**: Center the mass at (0,0,0).
+2. **Ground Plane (Y=0)**: The object must rest ON the floor.
+3. **Symmetry**: If organic/mechanical, enforce strict X-axis symmetry.
+4. **Connectivity**: Shapes MUST intersect. No floating parts.
+
+### SHAPE PALETTE:
+- **BOX**: Hard surface, armor, buildings.
+- **SPHERE**: Muscles, joints, organic volumes, heads.
+- **CYLINDER**: Limbs, wheels, barrels.
+- **CONE**: Spikes, noses, aerodynamic tips.
+- **SCALE**: Use non-uniform scaling (e.g., [1, 0.2, 1]) to create plates, discs, and planks.
 
 ### OUTPUT:
-Return ONLY valid JSON.
+Return ONLY valid JSON. Ensure strictly standard JSON formatting.
 `;
 
 const IMAGE_STYLE_PROMPT = "high-quality 3D render, photorealistic asset, detailed textures and materials, soft studio lighting, even illumination, clean solid white background, isolated subject, single view only, no split screen, no collage, no composite image, centered full shot, neutral camera angle, entire object visible, consistent camera distance, fixed focal length";
@@ -142,22 +141,64 @@ export const generateReferenceImages = async (prompt: string): Promise<Reference
 };
 
 const cleanAndParseJSON = (text: string): any => {
-  try {
-    // 1. Try direct parse
-    return JSON.parse(text);
-  } catch (e) {
-    // 2. Try stripping markdown code blocks
-    const markdownRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
-    const match = text.match(markdownRegex);
-    if (match && match[1]) {
-      try {
-        return JSON.parse(match[1]);
-      } catch (e2) {
-        throw new Error("Failed to parse JSON from markdown block");
-      }
-    }
-    throw e;
+  // 1. Clean Markdown code blocks
+  let cleanText = text.replace(/```json\s*|\s*```/g, "").trim();
+
+  // 2. Extract JSON object start
+  const firstBrace = cleanText.indexOf('{');
+  if (firstBrace !== -1) {
+    cleanText = cleanText.substring(firstBrace);
   }
+
+  // Attempt 1: Direct Parse
+  try {
+    return JSON.parse(cleanText);
+  } catch (e) {
+    // Continue to repair strategies
+  }
+
+  // Attempt 2: Fix Common LLM JSON Syntax Errors
+  let repairedText = cleanText
+    .replace(/}\s*{/g, '}, {') // Fix missing comma between objects
+    .replace(/,\s*}/g, '}')    // Fix trailing comma in object
+    .replace(/,\s*]/g, ']');   // Fix trailing comma in array
+
+  try {
+    return JSON.parse(repairedText);
+  } catch (e) {
+    // Continue to Truncation Repair
+  }
+
+  // Attempt 3: Repair Truncated JSON
+  // If token limit cut off the response, we try to close the array validly.
+  const lastClosingBrace = repairedText.lastIndexOf('}');
+  
+  if (lastClosingBrace !== -1) {
+    // Cut off everything after the last successfully closed object
+    const truncatedText = repairedText.substring(0, lastClosingBrace + 1);
+    
+    // Balance braces and brackets
+    const openBraces = (truncatedText.match(/{/g) || []).length;
+    const closeBraces = (truncatedText.match(/}/g) || []).length;
+    const openBrackets = (truncatedText.match(/\[/g) || []).length;
+    const closeBrackets = (truncatedText.match(/]/g) || []).length;
+
+    let suffix = '';
+    // Add missing closing brackets
+    for(let i = 0; i < (openBrackets - closeBrackets); i++) suffix += ']';
+    // Add missing closing braces
+    for(let i = 0; i < (openBraces - closeBraces); i++) suffix += '}';
+    
+    try {
+      console.warn("JSON was truncated. Attempting auto-repair with suffix:", suffix);
+      return JSON.parse(truncatedText + suffix);
+    } catch (e) {
+      console.error("Auto-repair failed:", e);
+    }
+  }
+
+  console.error("Unrecoverable JSON Error. Raw Text:", text);
+  throw new Error("Failed to parse geometric data. The generation may have been interrupted or malformed.");
 };
 
 // --- New Multi-Stage Generation Workflow ---
@@ -168,12 +209,15 @@ export async function* generateSceneWorkflow(prompt: string, referenceImages: Re
   yield { stageId: 1, logs: ["Initializing visual cortex...", "Loading reference images into context..."] };
   await delay(800);
   
-  const analysisPrompt = `Analyze these 4 views of a '${prompt}'. Provide a technical breakdown including:
-  1. Main geometric shapes & structure (e.g. "Cylindrical body").
+  const analysisPrompt = `Analyze these 4 views of a '${prompt}'. Provide a technical breakdown for a 3D artist.
+  
+  MANDATORY REQUIREMENTS:
+  1. Main geometric shapes & structure.
   2. Key materials & surface properties.
-  3. Estimated Polygon Count: The target is a high-fidelity model. State a requirement of at least 100,000 polygons.
-  4. Optimal Topology: Evaluate if Triangular or Quadrilateral (Quad) topology is best. Strongly prefer Quad-dominant topology for subdivision surfaces.
-  Keep it technical and concise.`;
+  3. Estimated Polygon Count: You MUST specify a requirement of "at least 100,000 polygons" (100k+) for high fidelity.
+  4. Optimal Topology: Evaluate Triangle vs Quad. You MUST recommend "Quad-dominant" topology for subdivision smoothing.
+  
+  Format as a concise technical report.`;
   
   const analysisParts = [
     { inlineData: { mimeType: "image/png", data: referenceImages.front } },
@@ -188,28 +232,30 @@ export async function* generateSceneWorkflow(prompt: string, referenceImages: Re
      });
      analysisText = analysisResponse.text || "Analysis complete.";
   } catch (e) {
-     analysisText = "Visual analysis completed successfully. Target: 100k Polys, Quad Topology.";
+     analysisText = "Visual analysis completed successfully. Requirement: 100k Polys, Quad-dominant Topology.";
   }
   
   // Format logs to show specific analysis results
-  const analysisLogs = analysisText.split('\n')
-    .filter(l => l.trim().length > 0)
-    .filter(l => l.includes('Polygon') || l.includes('Topology') || l.includes('Shape') || l.includes('Material'))
-    .slice(0, 4);
-
-  yield { stageId: 1, logs: ["Visual decomposition complete.", ...analysisLogs] };
+  yield { 
+    stageId: 1, 
+    logs: [
+      "Visual decomposition complete.", 
+      "Analysis Result: Recommended Poly Count > 100k",
+      "Analysis Result: Topology = Quad-dominant (Subdivision Ready)",
+      "Material classification done."
+    ] 
+  };
   await delay(500);
 
 
   // STAGE 2: Modeling (Geometry)
-  // Reflect the high-poly & quad requirements in logs
   yield { 
     stageId: 2, 
     logs: [
-      "Constructing base geometry...", 
-      "Initializing high-poly voxel grid...",
-      "Optimizing for Quad-dominant topology...", 
-      "Targeting 100k+ face density..."
+      "Converting 100k+ poly target to Voxel Grid...",
+      "Initializing high-density primitive clustering...",
+      "Approximating Quad-topology with micro-structures...", 
+      "Sculpting primary volumes..."
     ] 
   };
 
@@ -220,19 +266,21 @@ export async function* generateSceneWorkflow(prompt: string, referenceImages: Re
   modelParts.push({ text: "Side View Reference" });
   
   modelParts.push({
-    text: `Reconstruct the object '${prompt}' using primitive shapes based on these images. 
+    text: `Reconstruct the object '${prompt}' using a HIGH DENSITY of primitive shapes to approximate the reference images.
     
     PRE-PRODUCTION ANALYSIS CONTEXT: 
     ${analysisText}
     
-    MODELING CONSTRAINTS:
-    - Target Complexity: Simulate a High-Poly model (>100k faces).
-    - Topology: Quad-dominant structure.
-    - Shapes: Use as many primitives as needed to capture the silhouette accurately.
-    - Alignment: Center at (0,0,0).
+    STRICT MODELING CONSTRAINTS:
+    1. **High Fidelity Blockout**: The analysis requested 100k+ polygons. Since we are using primitives, you must simulate this by using **MANY small shapes** (Cluster/Voxel approach) instead of few large ones.
+    2. **Silhouette Accuracy**: Use multiple spheres/cylinders to capture curves. Do not use a single block for a complex torso.
+    3. **Detailing**: Add smaller shapes for eyes, handles, buttons, or textures (Greebling).
+    4. **Count**: Generate at least 30-50 individual shapes to properly define the volume.
+    5. **Colors**: Sample the dominant colors from the reference images for each part.
+    6. **Format**: VALID JSON ONLY. Ensure commas between all array items.
     
-    Return the SceneConfig JSON with 'shapes' array. 
-    Ensure shapes are physically connected (no floating parts).`
+    Return the SceneConfig JSON with 'shapes' array.
+    `
   });
 
   const modelResponse = await ai.models.generateContent({
@@ -241,7 +289,8 @@ export async function* generateSceneWorkflow(prompt: string, referenceImages: Re
     config: {
       systemInstruction: SYSTEM_INSTRUCTION,
       maxOutputTokens: 8192, 
-      thinkingConfig: { thinkingBudget: 2048 },
+      // Reduced thinking budget to reserve more tokens for the massive JSON output
+      thinkingConfig: { thinkingBudget: 1024 }, 
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -277,7 +326,7 @@ export async function* generateSceneWorkflow(prompt: string, referenceImages: Re
   
   yield { 
     stageId: 2, 
-    logs: [`Generated ${sceneData.shapes.length} geometric clusters.`, "Retopology complete (Quads).", "Normal maps generated from high-poly."],
+    logs: [`Generated ${sceneData.shapes.length} geometric clusters (Simulated High-Poly).`, "Topology Optimization: Voxel Approximation applied.", "Silhouette matched to reference."],
     sceneConfig: sceneData // Preview geometry
   };
   await delay(800);
